@@ -1,0 +1,153 @@
+import datetime, requests, sqlite3, pandas as pd
+
+# IMPORTANTE!!! Inserir aqui a sua chave de acesso e ticker.
+key = 'LV2V16B1CFKWYYHK'
+ticker = 'PETR4.SAO'
+
+# A variável tabela é uma string que é igual aos 5 primeiros dígitos do ticker imputado e será o nome da tabela durante
+# a criação automatica da base de dados local. Isto irá automatizar a criação de novas tabelas para diferentes ativos,
+# sem que haja a necessidade de alterarmos o códgo toda vez que alterarmos a busca de um ativo diferente
+tabela = str(ticker[0:5])
+
+#_______________________________________________________________________________________________________________________
+# Função chave para extrair dados da API, para então retornar um dicionário com os valores de DATA e PREÇO do ATIVO imputado acima.
+def importar_cotacoes (ativo, data):
+
+    #Aqui os dados da API são convertidos em formato .JSON utilizando a função TIME_SERIES_DAILY dada a variavel ativo.
+    raw_data = requests.get('https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol='+ativo+'&outputsize=daily&apikey='+key+'').json()
+
+    #Aqui o valor '4. Close' é parseado do dicionário .JSON a partir da data imputada na função, e é então armazenado como float na variável preco.
+    preco = float((raw_data["Time Series (Daily)"][data]['4. close']))
+
+    #a função então retorna um dicionário contendo os três valores que estamos interessados: Data, ativo e preço.
+    return {"data": data, "ativo": ativo, "preço": preco}
+
+#_______________________________________________________________________________________________________________________
+#A função dia da semana é um mecanismo que nos ajudará a detectar quando for sábado ou domingo, para assim não termos erros
+# relacionados a falta de cotações em alguns dias.
+def dia_da_semana(yesterday):
+
+#A biblioteca pandas possui uma função de TimeStamp que nos ajudará a atribuír um índice de 0-6 para cada dia da semana.
+    dia = pd.Timestamp(yesterday)
+
+# A função nos retorna um índice de 0-6.
+    return dia.dayofweek
+
+
+#_______________________________________________________________________________________________________________________
+# Dentro da lista abaixo armazenarmos os dicionarios {"data": data, "ativo": ativo, "preço": preco} de cada dia.
+# No momento da persitência de dados esta lista será como um pacote que será enviado de uma só vez à base de dados.
+importacao = []
+
+#_______________________________________________________________________________________________________________________
+#Iteração para pegarmos os dados da última semana (últimos 7 dias).
+#Neste bloco a variável 'i' abaixo será importante para o programa saber o dia da semana, pois só temos dados de segunda a sexta.
+for i in range(7):
+
+# Como lidamos sempre com os preços de fechamento do dia anterior, 'yesterday' é uma string (YYYY-MM-DD) com a data de ontem,
+# conforme a data dos dados extraídos do JSON e a cada iteração o valor de yesterday volta 'i' dias atrás.
+# A variável Yesterday, então, será utilizado como parâmetro 'data' para a função IMPORTAR_COTACOES, não sendo necessário
+# inserir manualmente o valor para este parâmetro.
+
+    yesterday = str(datetime.date.today() - datetime.timedelta(days=i+1))
+
+    #A variável dia retorna o índice do dia da semana da função dia_da_semana().
+    dia = dia_da_semana(yesterday)
+
+    # Bloco TRY e EXCEPTION serve para detectar quando não houver cotação em algum dia dentro da semana,
+    # por exemplo em feriados ou por outros motivos.
+    try:
+        # Se a data do dia cair em um sábado ou domingo(índices 5 e 6, respectivamente), as cláusulas IF e ELIF nem irão
+        # tentar executar a função de extração de preços, o que acarretaria erros.
+        if dia == 5:
+            print(yesterday, ":", "Sem cotação disponível - Sábado")
+
+        elif dia == 6:
+            print (yesterday, ":", "Sem cotação disponível - Domingo")
+
+        else:
+            # aqui a função de importar cotações é executada sem que hája necessidade de inserir os parâmetros Ativo e Data.
+            # Parâmetro ativo foi inserido no início do código e o parametro data é a própria variável data que muda conforme a iteração.
+            # o dicionário 'dicionario' é o conjunto de dados que buscamos (data, ativo e preço), que é inserido na lista
+            # importacao através da função .append.
+            dicionario = importar_cotacoes(ticker, yesterday)
+            importacao.append(dicionario)
+            print (yesterday, ":", dicionario)
+
+    except KeyError:
+        # Caso houver qualquer erro na extração da API.
+        print (yesterday, "ERRO404: Sem cotação disponível - contate o administrador.")
+
+#_______________________________________________________________________________________________________________________
+# Estabelecer conexão com o banco de dados SQLite. o código abaixo irá criar uma base de dados local chamada convest, a não ser
+#que já exista uma base de dados com este mesmo nome, caso haja, a função irá simplesmente se conectar com a base existente.
+print ("\n\n persistência de dados")
+SQLite = sqlite3.connect('convest.db')
+cursor = SQLite.cursor()
+
+# Aqui é criada AUTOMATICAMENTE a tabela caso esta ainda não tenha sido criada. Caso uma tabela com o mesmo nome já exista,
+# o query abaixo se conectará a esta tabela. A tabela criada receberá automaticamente o nome da variável string que
+# são os 5 primeiros dígitos do nome do ticker, conforme explicado no início do código. Por exemplo 'PETR4' ou 'B3SA3'.
+cursor.execute("CREATE TABLE IF NOT EXISTS '"+tabela+"'(data text PRIMARY KEY, ativo text, preco real); ")
+
+#_______________________________________________________________________________________________________________________
+# Função para checar se os dados em questão que temos já se encontram na base de dados. Está função será utilizada caso
+# haja algum erro relacionado a chave primária 'Data' no momento da inserção de dados.
+def checar(data_inicial):
+    cursor.execute("SELECT preco FROM '"+tabela+"' WHERE data = '"+data_inicial+"'")
+    return float(cursor.fetchone()[0])
+
+#_______________________________________________________________________________________________________________________
+# Função ATUALIZAR. Utilizada para atualizarmos valor no banco de dados.
+def atualizar(data, novo_preco):
+    cursor.execute("UPDATE '"+tabela+"' SET preco = '"+str(novo_preco)+"' WHERE data = '"+data+"'")
+
+#_______________________________________________________________________________________________________________________
+# Função INSERT para inserir valores no banco de dados.
+def inserir(data, ativo, preco):
+    cursor.execute("INSERT INTO '"+tabela+"'('data', 'ativo', 'preco') VALUES ('"+data+"', '"+ativo+"', "+str(preco)+")")
+
+#_______________________________________________________________________________________________________________________
+# Na iteração abaixo o programa tentará inserir sucessivamente entradas na tabela do banco de dados 'n' vezes, onde 'n'
+# é número de dicionários dentro da lista importacao.
+# Caso surja algum erro de importação, será em função de repetição da coluna 'Data', que é a chave primária da tabela,
+# o que significa que já há valores para aquela data na tabela, então o programa irá checar e conciliar estes valores.
+
+for n in range(len(importacao)):
+
+#___SE O VALOR DA COTAÇÃO FOR NOVO E NÃO ESTIVER NA BASE DE DADOS_______________________________________________________
+
+    #Aqui o programa tenta inserir o novo valor na base de dados.
+    try:
+        #Neste caso se não houve erro de exceção em função da chave primária o código ativará a função inserir().
+        inserir(importacao[n]['data'], importacao[n]['ativo'], importacao[n]['preço'])
+        print ("Novo valor inserido com sucesso!!")
+
+
+
+#___SE O VALOR NÃO FOR NOVO E JÁ SE ENCONTRA NA BASE DE DADOS___________________________________________________________
+
+#Tratamento para resolução do problema da chave primário 'data' repetida. O error IntegrityError é especificamente causado
+#quando existem duas entradas iguais na coluna primária. Neste bloco o programa analisará se o preço existente na
+#tabela (valor_tabela) é igual ou diferente do valor que extraímos no início do código.
+    except sqlite3.IntegrityError:
+
+        #aqui é feita a checagem de valores. valor_tabela é o preço na tabela na data parâmetro.
+        valor_tabela = checar(importacao[n]['data'])
+
+        if valor_tabela == importacao[n]['preço']:
+            print("Dados já armazenados")
+
+        else:
+            # aqui é ativada a função atualizar
+            print ("O preço da data diverge do valor que consta na base de dados.")
+            atualizar(importacao[n]['data'], importacao[n]['preço'])
+            print ("Valor antigo:", valor_tabela, "| Novo valor atualizado:", importacao[n]['preço'])
+
+
+#_______________________________________________________________________________________________________________________
+SQLite.commit()
+
+SQLite.close()
+print ("\n\nConexão encerrada...")
+
